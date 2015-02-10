@@ -1,0 +1,284 @@
+#-------------------------------------------------------------------------------
+# Name:        KmlFromArcSDEdatabase.py
+#
+# Purpose:     Creates a static kml file based on a ArcSDE database connection.
+#              The first field in the SQL must be the ST_Geometry field for this
+#              script to work. All other fields selected are stripped out for
+#              simplicity.
+#
+# Author:      listhelp@dpipwe.tas.gov.au
+#
+# Created:     03/12/2014
+
+# Syntax:      python KmlFromArcSDEdatabase.py -c <connection>* -q <SQL query>*
+#              -k <full kml output path>* [-h]
+#
+#              * = Required arguments
+#
+#              -c <connection> - Specifies the oracle database connection to use
+#              in the format user/password@server
+#
+#              -q <oracle sde query> - Specifies the SQL query to return from
+#              the database where the first filed must be the shape field. (A
+#              limit of 2000 records is used in this script via the where clause
+#              eg: WHERE ROWNUM <= 2000. If the where clause is already used in
+#              the SQL please ensure that you include " AND ROWNUM <= 2000"
+#              otherwise the initial where clause will be replaced.)
+#
+#              -k <kml full path> - Specifies the output kml location
+#              eg: "C:\temp\database.kml"
+#
+#              -h - Help and syntax for the python script
+#
+# Details:     Written in python 2.7 to work in Windows XP or Windows 7. KML
+#              syntax was derived from
+#              https://developers.google.com/kml/documentation/kmlreference
+#-------------------------------------------------------------------------------
+# Required libraries
+import cx_Oracle
+import sys
+import getopt
+import os
+from shutil import move
+#-------------------------------------------------------------------------------
+# Argument handler
+def main(argv):
+    connection = ''
+    sqlQuery = ''
+    kmlOutput = ''
+    try:
+        # Gets the user supplied options and corresponding arguments
+        opts, args = getopt.getopt(argv, 'hc:q:k:')
+    except getopt.GetoptError:
+        usage()
+        sys.exit()
+    for opt, arg in opts:
+        if opt in ('-h'):
+            usage()
+            sys.exit()
+        elif opt in ('-c'):
+            connection = arg
+        elif opt in ('-q'):
+            sqlQuery = arg
+        elif opt in ('-k'):
+            kmlOutput = arg
+
+    # Will terminate the script if the required arguments were not provided
+    if connection == '':
+        print 'No oracle connection was specified\n'
+        usage()
+        sys.exit()
+    elif sqlQuery == '':
+        print 'No oracle SQL query was specified\n'
+        usage()
+        sys.exit()
+    elif kmlOutput == '':
+        print 'No kml output was specified\n'
+        usage()
+        sys.exit()
+
+    return (connection, sqlQuery, kmlOutput)
+#-------------------------------------------------------------------------------
+# Usage function called when incorrect arguments are supplied
+def usage():
+    print '\nSyntax is:\n\nKmlFromArcSDEdatabase.py -c <connection>* -q <SQL query>* -k <full kml output path>* [-h]\n\n* = Required arguments\n'
+    print '-c <connection> - Specifies the oracle database connection to use in the'
+    print 'format user/password@server\n'
+    print '-q <oracle sde query> - Specifies the SQL query to return from the database'
+    print 'where the first filed must be the shape field. (A limit of 2000 records is'
+    print 'used in this script via the where clause eg: WHERE ROWNUM <= 2000. If the'
+    print 'where clause is already used in the SQL please ensure that you include'
+    print '" AND ROWNUM <= 2000" otherwise the initial where clause will be replaced.)\n'
+    print '-k <kml full path> - Specifies the output kml location'
+    print 'eg: "C:\\temp\\database.kml"\n'
+    print '-h - Help and syntax for the python script'
+    raw_input("\n\n****Press enter to exit! ****")
+#-------------------------------------------------------------------------------
+# Main script that builds the kml using the user supplied arguments
+if __name__ == "__main__":
+    # Variables used to hold the user supplied arguments
+    oracleCon, oracleQeury, kmlLocation = main(sys.argv[1:])
+    newKml = kmlLocation
+
+    # The SQL is split and modified to extract the coordinates from the
+    # ST_Geometry field
+    queryLeftSide = oracleQeury.upper().split(' ')[0]
+    shapeField = oracleQeury.upper().split('SELECT ')[1].split(' ')[0].split(',')[0]
+    queryRightSide = 'FROM ' + oracleQeury.upper().split(' FROM ')[1]
+
+    # A quick check to see if the maximum number of records is <= 2000
+    if queryRightSide.find('WHERE ROWNUM <= 2000') > -1:
+        newQuery =  queryLeftSide + ' sde.st_astext(sde.st_transform(' + shapeField + ',4326)) ' + queryRightSide
+    else:
+        queryRightSide = queryRightSide.split(' ')[0] + ' ' + queryRightSide.split(' ')[1]
+        newQuery =  queryLeftSide + ' sde.st_astext(sde.st_transform(' + shapeField + ',4326)) ' + queryRightSide + ' WHERE ROWNUM <= 2000'
+
+    # The temporary kml output
+    tempKml = 'temp.kml'
+    writeFile = open(tempKml,'w')
+
+    # Starts forming the kml
+    kmlText = '<?xml version="1.0" encoding="UTF-8"?>\n<kml xmlns="http://www.opengis.net/kml/2.2">\n'
+    kmlText += '<Document>\n\t<name>temp.kml</name>\n\t<open>1</open>\n\t'
+    kmlText += '<Style id="examplePolyStyle">\n\t\t<PolyStyle>\n\t\t\t<color>ffffffff</color>\n\t\t\t<colorMode>random</colorMode>\n\t\t\t<outline>0</outline>\n\t\t</PolyStyle>\n\t</Style>\n\t'
+    kmlText += '<Style id="examplePointStyle">\n\t\t<IconStyle>\n\t\t\t<color>ffffffff</color>\n\t\t\t<colorMode>random</colorMode>\n\t\t\t<scale>0.6</scale>\n\t\t</IconStyle>\n\t\t<LabelStyle>\n\t\t\t<scale>0</scale>\n\t\t</LabelStyle>\n\t</Style>\n\t'
+    kmlText += '<Style id="exampleLineStyle">\n\t\t<LineStyle>\n\t\t\t<color>ffffffff</color>\n\t\t\t<colorMode>random</colorMode>\n\t\t\t<width>2</width>\n\t\t</LineStyle>\n\t</Style>\n\t'
+
+    # Connects to the oracle table
+    listmapCon = cx_Oracle.connect(oracleCon)
+    roadClosureCur = listmapCon.cursor()
+
+    # Attempts to execute the modified SQL statement
+    try:
+        roadClosureCur.execute(newQuery)
+        # A counter used to store the number of returned records
+        counter = 0
+        # Loops through each returned record from the SQL statement
+        for result in roadClosureCur:
+            # Requires valid shape (ST_Geometry field was the first field in the
+            # SQL statement)
+            shapeEntry = str(result[0])
+            shapeGeomType = shapeEntry.split('(')[0].strip()
+            # Strips out coordinates for multipolygon types
+            if shapeGeomType.upper() == 'MULTIPOLYGON':
+                coordinates = shapeEntry.strip('MULTIPOLYGON')
+                coordinates = coordinates.replace('),( ',',0|||')
+                coordinates = coordinates.replace('),(',',0|||')
+                coordinates = coordinates.replace('( ','')
+                coordinates = coordinates.replace('(','')
+                coordinates = coordinates.replace(')','')
+                coordinates = coordinates.strip()
+                coordinates = coordinates.replace(', ',',0 ')
+                coordinates = coordinates + ',0'
+                coordinates = coordinates.replace(' ',',')
+                coordinates = coordinates.replace(',0,',',0 ')
+                coordinates = coordinates.replace(',0,',',0 ')
+                coordinates = coordinates.replace('|||','\n\t\t\t\t\t\t</coordinates>\n\t\t\t\t\t</LinearRing>\n\t\t\t\t</outerBoundaryIs>\n\t\t\t</Polygon>\n\t\t\t<Polygon>\n\t\t\t\t<extrude>1</extrude>\n\t\t\t\t<outerBoundaryIs>\n\t\t\t\t\t<LinearRing>\n\t\t\t\t\t\t<coordinates>\n\t\t\t\t\t\t')
+
+                # Remaining kml formatting for multipolygon types
+                kmlText += '<Placemark>\n\t\t<name>Multipolygon ID = ' + str(counter) + '</name>\n\t\t<styleUrl>#examplePolyStyle</styleUrl>\n\t\t'
+                kmlText += '<MultiGeometry>\n\t\t\t<Polygon>\n\t\t\t\t<extrude>1</extrude>\n\t\t\t\t'
+                kmlText += '<outerBoundaryIs>\n\t\t\t\t\t<LinearRing>\n\t\t\t\t\t\t<coordinates>\n\t\t\t\t\t\t\t' + coordinates +'\n\t\t\t\t\t\t'
+                kmlText += '</coordinates>\n\t\t\t\t\t</LinearRing>\n\t\t\t\t</outerBoundaryIs>\n\t\t\t</Polygon>\n\t\t</MultiGeometry>\n\t</Placemark>'
+
+            # Strips out coordinates for polygon types
+            elif shapeGeomType.upper() == 'POLYGON':
+                coordinates = shapeEntry.strip('POLYGON')
+                coordinates = coordinates.replace('(','')
+                coordinates = coordinates.replace(')','')
+                coordinates = coordinates.strip()
+                coordinates = coordinates.replace(', ',',0 ')
+                coordinates = coordinates + ',0'
+                coordinates = coordinates.replace(' ',',')
+                coordinates = coordinates.replace(',0,',',0 ')
+
+                # Remaining kml formatting for polygon types
+                kmlText += '<Placemark>\n\t\t<name>Polygon ID = ' + str(counter) + '</name>\n\t\t<styleUrl>#examplePolyStyle</styleUrl>\n\t\t'
+                kmlText += '<Polygon>\n\t\t\t\t<extrude>1</extrude>\n\t\t\t\t'
+                kmlText += '<outerBoundaryIs>\n\t\t\t\t\t<LinearRing>\n\t\t\t\t\t\t<coordinates>\n\t\t\t\t\t\t\t' + coordinates +'\n\t\t\t\t\t\t'
+                kmlText += '</coordinates>\n\t\t\t\t\t</LinearRing>\n\t\t\t\t</outerBoundaryIs>\n\t\t\t</Polygon>\n\t</Placemark>'
+
+            # Strips out coordinates for point types
+            elif shapeGeomType.upper() == 'POINT':
+                coordinates = shapeEntry.strip('POINT')
+                coordinates = coordinates.replace('(','')
+                coordinates = coordinates.replace(')','')
+                coordinates = coordinates.strip()
+                coordinates = coordinates.replace(' ',',')
+                coordinates = coordinates + ',0'
+
+                # Remaining kml formatting for point types
+                kmlText += '<Placemark>\n\t\t<name>Point ID = ' + str(counter) + '</name>\n\t\t<styleUrl>#examplePointStyle</styleUrl>\n\t\t'
+                kmlText += '<Point>\n\t\t\t\t<extrude>1</extrude>\n\t\t\t\t'
+                kmlText += '<coordinates>\n\t\t\t\t\t' + coordinates +'\n\t\t\t\t'
+                kmlText += '</coordinates>\n\t\t\t</Point>\n\t</Placemark>'
+
+            # Strips out coordinates for multipoint types
+            elif shapeGeomType.upper() == 'MULTIPOINT':
+                print shapeEntry
+                coordinates = shapeEntry.strip('MULTIPOINT')
+                coordinates = coordinates.replace('(','')
+                coordinates = coordinates.replace(')','')
+                coordinates = coordinates.strip()
+                coordinates = coordinates.replace(', ',',0\n\t\t\t\t</coordinates>\n\t\t\t</Point>\n\t\t\t<Point>\n\t\t\t\t<extrude>1</extrude>\n\t\t\t\t<coordinates>\n\t\t\t\t\t')
+                coordinates = coordinates + ',0'
+                coordinates = coordinates.replace(' ',',')
+                coordinates = coordinates.replace(',0,',',0 ')
+                coordinates = coordinates.replace(',0,',',0 ')
+
+                # Remaining kml formatting for multipoint types
+                kmlText += '<Placemark>\n\t\t<name>Multipoint ID = ' + str(counter) + '</name>\n\t\t<styleUrl>#examplePointStyle</styleUrl>\n\t\t'
+                kmlText += '<MultiPoint>\n\t\t\t<Point>\n\t\t\t\t<extrude>1</extrude>\n\t\t\t\t'
+                kmlText += '<coordinates>\n\t\t\t\t\t' + coordinates +'\n\t\t\t\t'
+                kmlText += '</coordinates>\n\t\t\t</Point>\n\t\t</MultiPoint>\n\t</Placemark>'
+
+            # Strips out coordinates for linestring types
+            elif shapeGeomType.upper() == 'LINESTRING':
+                coordinates = shapeEntry.strip('LINESTRING')
+                coordinates = coordinates.replace('(','')
+                coordinates = coordinates.replace(')','')
+                coordinates = coordinates.strip()
+                coordinates = coordinates.replace(', ',',0 ')
+                coordinates = coordinates.replace(' ',',')
+                coordinates = coordinates.replace(',0,',',0 ')
+                coordinates = coordinates + ',0'
+
+                # Remaining kml formatting for linestring types
+                kmlText += '<Placemark>\n\t\t<name>Linestring ID = ' + str(counter) + '</name>\n\t\t<styleUrl>#exampleLineStyle</styleUrl>\n\t\t'
+                kmlText += '<LineString>\n\t\t<extrude>1</extrude>\n\t\t<tessellate>1</tessellate>\n\t\t'
+                kmlText += '<coordinates>\n\t\t\t' + coordinates +'\n\t\t'
+                kmlText += '</coordinates>\n\t\t</LineString>\n\t</Placemark>'
+
+            # Strips out coordinates for multilinestring types
+            elif shapeGeomType.upper() == 'MULTILINESTRING':
+                coordinates = shapeEntry.strip('MULTILINESTRING')
+                coordinates = coordinates.replace('),( ',',0\n\t\t\t\t</coordinates>\n\t\t\t</LineString>\n\t\t\t<LineString>\n\t\t\t\t<extrude>1</extrude>\n\t\t\t\t<tessellate>1</tessellate>\n\t\t\t\t<coordinates>\n\t\t\t\t\t')
+                coordinates = coordinates.replace('((','')
+                coordinates = coordinates.replace('))',',0')
+                coordinates = coordinates.strip()
+                coordinates = coordinates.replace(', ',',0 ')
+                coordinates = coordinates.replace(' ',',')
+                coordinates = coordinates.replace(',0,',',0 ')
+
+                # Remaining kml formatting for multilinestring types
+                kmlText += '<Placemark>\n\t\t<name>Multilinestring ID = ' + str(counter) + '</name>\n\t\t<styleUrl>#exampleLineStyle</styleUrl>\n\t\t'
+                kmlText += '<MultiGeometry>\n\t\t\t<LineString>\n\t\t\t\t<extrude>1</extrude>\n\t\t\t\t<tessellate>1</tessellate>\n\t\t\t\t'
+                kmlText += '<coordinates>\n\t\t\t\t\t' + coordinates +'\n\t\t\t\t\t'
+                kmlText += '</coordinates>\n\t\t\t\t</LineString>\n\t\t</MultiGeometry>\n\t</Placemark>'
+
+            counter += 1
+
+        # Closes any open oracle connections
+        roadClosureCur.close()
+        listmapCon.close()
+    except:
+        # Handles any failed queries to Oracle
+        print 'First field in selection query was not the sde geometry field or the query ' + oracleQeury + ' returned unexpected results'
+        # Closes any open oracle connections
+        roadClosureCur.close()
+        listmapCon.close()
+        kmlText += '\n</Document>\n</kml>'
+        # Calls th usage function if fails
+        usage()
+        sys.exit()
+
+    # Closes of the kml with the document and kml tags
+    kmlText += '\n</Document>\n</kml>'
+
+    # Copies the contents of the kmlText variable into the temporary kml file
+    writeFile.write(kmlText)
+    writeFile.close()
+
+    # Renames the temporary kml to the specified kml and if there were issues
+    # writing the file, the temporary file is supplied to the user.
+    if os.path.exists(tempKml):
+        try:
+            move(tempKml, newKml)
+        except:
+            print 'The provided path (' + newKml + ') could not be written to.'
+            newKml = os.path.abspath(tempKml)
+
+    print '\n**** Kml created successfully under ' + newKml + ' ****'
+
+    # Used to hang onto a command window if used to call the script
+    raw_input("\n\n****Press enter to exit! ****")
